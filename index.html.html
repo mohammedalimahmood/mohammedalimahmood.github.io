@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ResusAid</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar for better aesthetics */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1f2937;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #4b5563;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+        }
+        /* Keyframes for the flashing animation */
+        @keyframes flash-red {
+            0%, 100% { background-color: transparent; }
+            50% { background-color: #991b1b; }
+        }
+        .flash-warning {
+            animation: flash-red 1s infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200">
+
+<div id="root"></div>
+
+<script type="text/babel">
+'use client';
+const { useState, useEffect, useRef } = React;
+const { createRoot } = ReactDOM;
+
+// Main App Component
+const App = () => {
+    // State for the main timer, live clock, and event log
+    const [timerRunning, setTimerRunning] = useState(false);
+    const [startTime, setStartTime] = useState(null);
+    const [elapsedTime, setElapsedTime] = useState(0);
+    const [liveClock, setLiveClock] = useState(new Date());
+    const [eventLog, setEventLog] = useState([]);
+    const [showHistory, setShowHistory] = useState(false);
+    const [currentRhythm, setCurrentRhythm] = useState('Unknown');
+    const [showReportModal, setShowReportModal] = useState(false);
+    const [showAlgorithmModal, setShowAlgorithmModal] = useState(false);
+    const [copyStatus, setCopyStatus] = useState('');
+    const [countdownTime, setCountdownTime] = useState(120); // 2 minutes in seconds
+    const [lastReportData, setLastReportData] = useState(null);
+    const [currentReportNumber, setCurrentReportNumber] = useState(1);
+    const [searchTerm, setSearchTerm] = useState('');
+    const [voiceCountdownEnabled, setVoiceCountdownEnabled] = useState(true);
+
+    // New state variables for additional notes, capnography, and voice recognition
+    const [additionalComments, setAdditionalComments] = useState('');
+    const [bloodGas, setBloodGas] = useState('');
+    const [capnography, setCapnography] = useState('');
+    const [teamMembers, setTeamMembers] = useState('');
+    const [isListening, setIsListening] = useState(false);
+    const [reversibleCauses, setReversibleCauses] = useState({
+        Hypoxia: false,
+        Hypovolaemia: false,
+        'Hypo-/Hyperkalaemia': false,
+        Hypothermia: false,
+        'Thrombosis (coronary/pulmonary)': false,
+        'Tamponade (cardiac)': false,
+        Toxins: false,
+        'Tension pneumothorax': false,
+    });
+    const reversibleCausesRef = useRef(reversibleCauses);
+    const additionalCommentsRef = useRef(additionalComments);
+    const capnographyRef = useRef(capnography);
+    const eventTimelineRef = useRef(null);
+    const adrenalineCountdownRef = useRef(null);
+    const [adrenalineCountdown, setAdrenalineCountdown] = useState(180); // 3 minutes in seconds
+    const [lastAdrenalineTime, setLastAdrenalineTime] = useState(null);
+    
+    // New states for prognostication and ALS Algorithm
+    const [showPostROSC, setShowPostROSC] = useState(false);
+    const [roscNotes, setRoscNotes] = useState('');
+    const [showRhythmModal, setShowRhythmModal] = useState(false);
+
+    // Ref for the timer interval
+    const timerRef = useRef(null);
+    const countdownRef = useRef(null);
+    const recognitionRef = useRef(null); // Ref for SpeechRecognition instance
+
+    // ALS algorithm state and flowchart
+    const [currentStep, setCurrentStep] = useState('Initial Check');
+    const [algorithmState, setAlgorithmState] = useState({
+        shockable: false,
+        nonShockable: false,
+        cprCycles: 0,
+        shocksGiven: 0,
+        adrenalineDoses: 0,
+        amiodaroneDoses: 0,
+        airwaySecured: false,
+        roscAchieved: false,
+    });
+    
+    // Function to handle voice alerts
+    const speakText = (text) => {
+        if ('speechSynthesis' in window) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            window.speechSynthesis.speak(utterance);
+        }
+    };
+
+    // Effect to handle the main timer logic
+    useEffect(() => {
+        if (timerRunning) {
+            timerRef.current = setInterval(() => {
+                setElapsedTime(Date.now() - startTime);
+            }, 100);
+        } else if (!timerRunning && timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+        }
+        return () => clearInterval(timerRef.current);
+    }, [timerRunning, startTime]);
+    
+    // BUG FIX: Rewritten countdown timer logic for accuracy and reliability
+    useEffect(() => {
+        if (timerRunning && (currentStep === 'Start CPR' || currentStep === 'Defibrillation/Shock' || currentStep === 'CPR/Adrenaline')) {
+            const nextRhythmCheckTime = Math.ceil(elapsedTime / 120000) * 120000;
+            const remainingTime = nextRhythmCheckTime - elapsedTime;
+            setCountdownTime(Math.floor(remainingTime / 1000));
+
+            countdownRef.current = setInterval(() => {
+                setCountdownTime(prevTime => {
+                    const newTime = prevTime - 1;
+                    if (newTime <= 0) {
+                        logEvent('2-minute CPR cycle complete. Recheck rhythm.');
+                        return 0; // The `handleRecheckRhythm` will reset it
+                    }
+                    return newTime;
+                });
+            }, 1000);
+        } else {
+            clearInterval(countdownRef.current);
+            setCountdownTime(120); // Reset when not in a CPR cycle
+        }
+        return () => clearInterval(countdownRef.current);
+    }, [timerRunning, currentStep, elapsedTime]);
+
+    // BUG FIX: Rewritten adrenaline timer logic for accuracy
+    useEffect(() => {
+        if (timerRunning && (algorithmState.nonShockable || algorithmState.adrenalineDoses > 0 || (algorithmState.shockable && algorithmState.shocksGiven >= 3))) {
+            const now = Date.now();
+            if (!lastAdrenalineTime) {
+                // If it's the first dose and timer is running, start countdown
+                if (algorithmState.nonShockable) {
+                    setLastAdrenalineTime(now);
+                } else if (algorithmState.shockable && algorithmState.shocksGiven >= 3) {
+                     setLastAdrenalineTime(now);
+                }
+            }
+            
+            if (lastAdrenalineTime) {
+                adrenalineCountdownRef.current = setInterval(() => {
+                    const timeSinceLastAdrenaline = (Date.now() - lastAdrenalineTime);
+                    const remaining = 180000 - timeSinceLastAdrenaline;
+                    setAdrenalineCountdown(Math.max(0, Math.floor(remaining / 1000)));
+                    if (remaining <= 0) {
+                        logEvent('Adrenaline due.');
+                        clearInterval(adrenalineCountdownRef.current);
+                        // Do not reset here, user interaction will reset `lastAdrenalineTime`
+                    }
+                }, 1000);
+            }
+        } else {
+            clearInterval(adrenalineCountdownRef.current);
+            setAdrenalineCountdown(180);
+        }
+
+        return () => clearInterval(adrenalineCountdownRef.current);
+    }, [timerRunning, algorithmState, lastAdrenalineTime]);
+
+    // Effect to handle the voice countdown
+    useEffect(() => {
+      if (voiceCountdownEnabled && (currentStep === 'Start CPR' || currentStep === 'Defibrillation/Shock' || currentStep === 'CPR/Adrenaline')) {
+        let utterance;
+        if (countdownTime === 30) {
+          utterance = new SpeechSynthesisUtterance("30 seconds to rhythm check.");
+        } else if (countdownTime === 10) {
+          utterance = new SpeechSynthesisUtterance("10 seconds to rhythm check.");
+        } else if (countdownTime === 0) {
+          utterance = new SpeechSynthesisUtterance("Rhythm check now.");
+        }
+
+        if (utterance) {
+          window.speechSynthesis.speak(utterance);
+        }
+      }
+    }, [countdownTime, voiceCountdownEnabled, currentStep]);
+    
+    // BUG FIX: Corrected voice countdown logic for adrenaline
+    useEffect(() => {
+        if (voiceCountdownEnabled) {
+            let utterance;
+            if (adrenalineCountdown === 60) {
+                utterance = new SpeechSynthesisUtterance("Adrenaline due in one minute.");
+            } else if (adrenalineCountdown === 10) {
+                utterance = new SpeechSynthesisUtterance("Adrenaline due in ten seconds.");
+            } else if (adrenalineCountdown <= 5 && adrenalineCountdown > 0) {
+                utterance = new SpeechSynthesisUtterance(`${adrenalineCountdown}`);
+            } else if (adrenalineCountdown === 0) {
+                utterance = new SpeechSynthesisUtterance("Adrenaline now.");
+            }
+            if (utterance) {
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+    }, [adrenalineCountdown, voiceCountdownEnabled]);
+
+    // Effect to update the live clock
+    useEffect(() => {
+        const clockInterval = setInterval(() => {
+            setLiveClock(new Date());
+        }, 1000);
+        return () => clearInterval(clockInterval);
+    }, []);
+
+    // Effect to load data from localStorage on initial render
+    useEffect(() => {
+        try {
+            const storedLog = localStorage.getItem('resusLog');
+            if (storedLog) {
+                setEventLog(JSON.parse(storedLog));
+            }
+            const storedReportNumber = localStorage.getItem('reportNumber');
+            if (storedReportNumber) {
+                setCurrentReportNumber(parseInt(storedReportNumber));
+            }
+        } catch (e) {
+            console.error('Failed to load data from local storage:', e);
+        }
+    }, []);
+    
+    // Function to handle voice input for comments
+    const handleVoiceInput = () => {
+        // Check for browser support
+        if (!('webkitSpeechRecognition' in window)) {
+            // Use a modal or custom message instead of alert()
+            const message = 'Your browser does not support the Web Speech API. Please use Google Chrome.';
+            const modal = document.createElement('div');
+            modal.innerHTML = `
+                <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div class="absolute inset-0 bg-black opacity-50"></div>
+                    <div class="bg-gray-800 p-6 rounded-2xl shadow-xl max-w-sm w-full z-10 text-center">
+                        <h3 class="text-xl font-bold mb-4 text-red-500">Error</h3>
+                        <p>${message}</p>
+                        <button onclick="document.body.removeChild(this.parentNode.parentNode)" class="mt-4 bg-gray-600 text-gray-200 font-semibold py-2 px-4 rounded-xl hover:bg-gray-700 transition duration-300">Close</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            return;
+        }
+
+        const recognition = new webkitSpeechRecognition();
+        recognitionRef.current = recognition; // Store recognition instance in a ref
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.lang = 'en-GB';
+
+        recognition.onstart = () => {
+            setIsListening(true);
+            console.log('Voice recognition started.');
+        };
+
+        recognition.onresult = (event) => {
+            const transcript = Array.from(event.results)
+                .map(result => result[0])
+                .map(result => result.transcript)
+                .join('');
+            
+            // Append new transcript to existing comments
+            setAdditionalComments(prevComments => prevComments + ' ' + transcript.trim());
+        };
+
+        recognition.onerror = (event) => {
+            console.error('Speech recognition error:', event.error);
+            setIsListening(false);
+            // You can add a visual message to the user here
+        };
+
+        recognition.onend = () => {
+            setIsListening(false);
+            console.log('Voice recognition ended.');
+        };
+
+        recognition.start();
+    };
+
+    const stopListening = () => {
+        if (recognitionRef.current) {
+            recognitionRef.current.stop();
+        }
+    };
+
+
+    // Function to save data to localStorage
+    const saveReport = (reportData) => {
+        try {
+            const reports = JSON.parse(localStorage.getItem('reports')) || {};
+            const newReportNumber = currentReportNumber;
+            reports[newReportNumber] = reportData;
+            localStorage.setItem('reports', JSON.stringify(reports));
+            localStorage.setItem('reportNumber', newReportNumber + 1);
+            setCurrentReportNumber(newReportNumber + 1);
+            return newReportNumber;
+        } catch (e) {
+            console.error('Failed to save report to local storage:', e);
+            return null;
+        }
+    };
+    
+    const loadSpecificReport = (reportNumber) => {
+        try {
+            const reports = JSON.parse(localStorage.getItem('reports')) || {};
+            const reportData = reports[reportNumber];
+            if (reportData) {
+                // BUG FIX: Add the reportNumber to the loaded data object
+                setLastReportData({ ...reportData, reportNumber });
+                setShowReportModal(true);
+            } else {
+                // Use a modal or custom message instead of alert()
+                const message = `Report number ${reportNumber} not found.`;
+                const modal = document.createElement('div');
+                modal.innerHTML = `
+                    <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+                        <div class="absolute inset-0 bg-black opacity-50"></div>
+                        <div class="bg-gray-800 p-6 rounded-2xl shadow-xl max-w-sm w-full z-10 text-center">
+                            <h3 class="text-xl font-bold mb-4 text-red-500">Error</h3>
+                            <p>${message}</p>
+                            <button onclick="document.body.removeChild(this.parentNode.parentNode)" class="mt-4 bg-gray-600 text-gray-200 font-semibold py-2 px-4 rounded-xl hover:bg-gray-700 transition duration-300">Close</button>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+            }
+        } catch (e) {
+            console.error('Failed to load report:', e);
+            const message = 'Failed to load the report.';
+            const modal = document.createElement('div');
+            modal.innerHTML = `
+                <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div class="absolute inset-0 bg-black opacity-50"></div>
+                    <div class="bg-gray-800 p-6 rounded-2xl shadow-xl max-w-sm w-full z-10 text-center">
+                        <h3 class="text-xl font-bold mb-4 text-red-500">Error</h3>
+                        <p>${message}</p>
+                        <button onclick="document.body.removeChild(this.parentNode.parentNode)" class="mt-4 bg-gray-600 text-gray-200 font-semibold py-2 px-4 rounded-xl hover:bg-gray-700 transition duration-300">Close</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+    };
+
+    // Function to format time for display
+    const formatTime = (ms) => {
+        const totalSeconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+        const seconds = (totalSeconds % 60).toString().padStart(2, '0');
+        const milliseconds = Math.floor((ms % 1000) / 100).toString();
+        return `${minutes}:${seconds}:${milliseconds}`;
+    };
+    
+    // Function to format the countdown time
+    const formatCountdown = (seconds) => {
+      const mins = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+      return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    // Function to log a new event
+    const logEvent = (action, details = {}) => {
+        const newEvent = {
+            action,
+            timer: formatTime(elapsedTime),
+            timestamp: liveClock.toLocaleTimeString('en-GB'),
+            details,
+            notes: additionalCommentsRef.current, // Log notes at the time of the event
+            capnography: capnographyRef.current, // Log capnography at the time of the event
+        };
+        const newLog = [...eventLog, newEvent];
+        setEventLog(newLog);
+    };
+
+    // Start/Stop button handler
+    const handleStartStop = () => {
+        if (timerRunning) {
+            setTimerRunning(false);
+            logEvent('Resuscitation Paused');
+        } else {
+            if (!startTime) {
+                setStartTime(Date.now());
+                logEvent('Resuscitation Started');
+            }
+            setTimerRunning(true);
+            logEvent('Resuscitation Resumed');
+        }
+    };
+
+    // Function to reset the app
+    const handleReset = () => {
+        const reportData = {
+            elapsedTime,
+            algorithmState,
+            reversibleCauses: reversibleCausesRef.current,
+            bloodGas,
+            capnography: capnographyRef.current, // Include capnography in the reset report data
+            teamMembers,
+            additionalComments: additionalCommentsRef.current,
+            roscNotes,
+            log: eventLog
+        };
+        saveReport(reportData);
+        stopListening(); // Stop any active voice recognition
+
+        setTimerRunning(false);
+        clearInterval(timerRef.current);
+        clearInterval(countdownRef.current);
+        clearInterval(adrenalineCountdownRef.current);
+
+        setStartTime(null);
+        setElapsedTime(0);
+        setEventLog([]);
+        setCurrentStep('Initial Check');
+        setCurrentRhythm('Unknown');
+        setCountdownTime(120);
+        setAdrenalineCountdown(180);
+        setLastAdrenalineTime(null);
+        setAlgorithmState({
+            shockable: false,
+            nonShockable: false,
+            cprCycles: 0,
+            shocksGiven: 0,
+            adrenalineDoses: 0,
+            amiodaroneDoses: 0,
+            airwaySecured: false,
+            roscAchieved: false,
+        });
+        setAdditionalComments('');
+        setBloodGas('');
+        setCapnography(''); // Reset capnography state
+        setTeamMembers('');
+        setRoscNotes(''); // Reset prognostication notes
+        setShowPostROSC(false); // Hide prognostication notes
+        setReversibleCauses({
+            Hypoxia: false,
+            Hypovolaemia: false,
+            'Hypo-/Hyperkalaemia': false,
+            Hypothermia: false,
+            'Thrombosis (coronary/pulmonary)': false,
+            'Tamponade (cardiac)': false,
+            Toxins: false,
+            'Tension pneumothorax': false,
+        });
+        setShowReportModal(false);
+        setLastReportData(null);
+    };
+
+    // Event button handlers
+    const handleShockGiven = () => {
+        setAlgorithmState(prev => ({ ...prev, shocksGiven: prev.shocksGiven + 1 }));
+        logEvent(`Shock given (Total: ${algorithmState.shocksGiven + 1})`, { shock: algorithmState.shocksGiven + 1 });
+        setCountdownTime(120); // Reset countdown after a shock
+        speakText('Shock delivered. Resume CPR immediately.');
+    };
+
+    const handleDrugGiven = (drug, dose) => {
+        if (drug === 'Adrenaline') {
+            setAlgorithmState(prev => ({ ...prev, adrenalineDoses: prev.adrenalineDoses + 1 }));
+            logEvent(`Adrenaline given (Dose: ${algorithmState.adrenalineDoses + 1})`);
+            setLastAdrenalineTime(Date.now()); // Reset adrenaline timer
+            setAdrenalineCountdown(180);
+            speakText('Adrenaline given. Continue CPR.');
+        } else if (drug === 'Amiodarone') {
+            setAlgorithmState(prev => ({ ...prev, amiodaroneDoses: prev.amiodaroneDoses + 1 }));
+            logEvent(`Amiodarone ${dose}mg given (Dose: ${algorithmState.amiodaroneDoses + 1})`);
+            speakText('Amiodarone given.');
+        }
+    };
+
+    const handleAirwaySecured = () => {
+        setAlgorithmState(prev => ({ ...prev, airwaySecured: true }));
+        logEvent('Airway Secured');
+    };
+
+    const handleROSC = () => {
+        setAlgorithmState(prev => ({ ...prev, roscAchieved: true }));
+        setTimerRunning(false);
+        logEvent('ROSC achieved');
+        setCurrentStep('Post-resuscitation Care');
+        setShowPostROSC(true);
+    };
+
+    const handleDiscontinue = () => {
+        setTimerRunning(false);
+        logEvent('CPR discontinued due to futility');
+        setCurrentStep('Ended');
+    }
+
+    // Function to re-check rhythm
+    const handleRecheckRhythm = () => {
+        setAlgorithmState(prev => ({
+            ...prev,
+            cprCycles: prev.cprCycles + 1
+        }));
+        setShowRhythmModal(true);
+        // Note: The rhythm selection and log event now happen in the modal
+    };
+    
+    // Function to handle rhythm selection from modal
+    const handleRhythmModalSelection = (rhythm) => {
+        setCurrentRhythm(rhythm);
+        if (rhythm === 'VF' || rhythm === 'pVT') {
+            setAlgorithmState(prev => ({ ...prev, shockable: true, nonShockable: false }));
+            setCurrentStep('Defibrillation/Shock');
+            logEvent(`Rhythm identified: Shockable (${rhythm})`);
+            speakText("Shockable rhythm identified. Charging defibrillator.");
+        } else if (rhythm === 'PEA' || rhythm === 'Asystole') {
+            setAlgorithmState(prev => ({ ...prev, nonShockable: true, shockable: false }));
+            setCurrentStep('CPR/Adrenaline');
+            logEvent(`Rhythm identified: Non-shockable (${rhythm})`);
+            speakText("Non-shockable rhythm identified. Continue CPR.");
+        } else {
+            setAlgorithmState(prev => ({ ...prev, nonShockable: false, shockable: false }));
+            setCurrentStep('Initial Check');
+            logEvent('Rhythm re-checked');
+        }
+        setShowRhythmModal(false);
+    };
+
+    // Function to generate the final report
+    const generateReport = (data, reportNumber) => {
+        const reportData = data || {
+            elapsedTime,
+            algorithmState,
+            reversibleCauses: reversibleCausesRef.current,
+            bloodGas,
+            capnography: capnographyRef.current, // Include capnography in report generation
+            teamMembers,
+            additionalComments: additionalCommentsRef.current,
+            roscNotes,
+            log: eventLog
+        };
+
+        const header = `--- Resus Event Report #${reportNumber} ---\n`;
+        const summary = `Event Duration: ${formatTime(reportData.elapsedTime)}\n` +
+            `Shocks Given: ${reportData.algorithmState.shocksGiven}\n` +
+            `Adrenaline Doses: ${reportData.algorithmState.adrenalineDoses}\n` +
+            `Amiodarone Doses: ${reportData.algorithmState.amiodaroneDoses}\n` +
+            `Airway Secured: ${reportData.algorithmState.airwaySecured ? 'Yes' : 'No'}\n` +
+            `ROSC Achieved: ${reportData.algorithmState.roscAchieved ? 'Yes' : 'No'}\n\n`;
+
+        const causes = Object.entries(reportData.reversibleCauses)
+            .filter(([cause, checked]) => checked)
+            .map(([cause]) => `  - ${cause}`)
+            .join('\n');
+        const reversibleCausesSection = `--- Reversible Causes Addressed ---\n` +
+            `${causes || 'None ticked'}\n\n`;
+
+        const notes = `--- Additional Notes ---\n` +
+            `Blood Gas: ${reportData.bloodGas || 'Not logged'}\n` +
+            `Capnography (ETCO2): ${reportData.capnography || 'Not logged'}\n` + // Add capnography to notes
+            `Team Members: ${reportData.teamMembers || 'Not logged'}\n` +
+            `Comments: ${reportData.additionalComments || 'None'}\n` +
+            `Prognostication: ${reportData.roscNotes || 'None'}\n\n`;
+
+        const timeline = reportData.log.map(event =>
+            `[Timer: ${event.timer} | Clock: ${event.timestamp}] ${event.action}${event.notes ? `\n  (Notes: ${event.notes})` : ''}`
+        ).join('\n');
+
+        return `${header}\n${summary}\n${reversibleCausesSection}\n${notes}\n--- Event Timeline ---\n${timeline}\n\n--- End of Report ---`;
+    };
+
+    // Update refs on state change
+    useEffect(() => {
+        reversibleCausesRef.current = reversibleCauses;
+    }, [reversibleCauses]);
+
+    useEffect(() => {
+        additionalCommentsRef.current = additionalComments;
+    }, [additionalComments]);
+    
+    useEffect(() => {
+        capnographyRef.current = capnography;
+    }, [capnography]);
+    
+    // Automatically scroll down the event timeline when a new entry is added
+    useEffect(() => {
+      if (eventTimelineRef.current) {
+        eventTimelineRef.current.scrollTop = eventTimelineRef.current.scrollHeight;
+      }
+    }, [eventLog]);
+
+
+    // SVG for icons
+    const SVGIcon = ({ icon, size = 24, color = 'currentColor' }) => {
+        const icons = {
+            // BUG FIX: Corrected SVG paths for multiple icons
+            ambulance: `<path d="M10 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v2"/><path d="M12 12V6"/><path d="M15 9h-6"/><path d="M18 12h-2.31a1 1 0 0 0-.92.62L13.5 16H8l-1.6-4.8A1 1 0 0 0 5.48 10H4"/><path d="M18 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z"/><path d="M8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z"/>`,
+            timer: `<circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>`,
+            history: `<path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>`,
+            download: `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>`,
+            zap: `<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>`,
+            syringe: `<path d="m3 3 5.25 5.25"/><path d="m8 15-5 5"/><path d="m14 6-5 5"/><path d="m14 17 6-6"/><path d="m18 2 4 4"/><path d="m20 10-6 6"/>`,
+            checkCircle: `<path d="M22 11.08V12a10 10 0 1 1-5.93-8.83"/><polyline points="22 4 12 14.01 9 11.01"/>`,
+            heartPulse: `<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`,
+            thermometer: `<path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>`,
+            tornado: `<path d="M21 4H3"/><path d="M18 8H3"/><path d="M21 12H3"/><path d="M18 16H3"/><path d="M21 20H3"/>`,
+            power: `<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>`,
+            refresh: `<polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9.36A9 9 0 0 1 21.49 15.64M20.49 8.36A9 9 0 0 1 2.51 14.64"/>`,
+            cross: `<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>`,
+            file: `<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline>`,
+            search: `<circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>`,
+            mic: `<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>`,
+        };
+        return (
+            <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width={size}
+                height={size}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke={color}
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                dangerouslySetInnerHTML={{ __html: icons[icon] }}
+            />
+        );
+    };
+
+    // Render the component
+    return (
+        <div className="min-h-screen bg-gray-900 text-gray-200 p-4 font-sans flex flex-col items-center">
+            {/* Report Modal */}
+            {showReportModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-black opacity-50"></div>
+                    <div className="bg-gray-800 p-6 rounded-2xl shadow-xl max-w-lg w-full z-10">
+                        <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                            <SVGIcon icon="download" size={24} />
+                            Generated Report
+                        </h3>
+                        <textarea
+                            readOnly
+                            className="w-full h-64 bg-gray-700 p-4 rounded-lg text-sm font-mono overflow-auto resize-none"
+                            value={generateReport(lastReportData, lastReportData.reportNumber)}
+                        />
+                        {copyStatus && (
+                            <p className="text-sm text-green-400 mt-2 text-center">{copyStatus}</p>
+                        )}
+                        <div className="mt-4 flex justify-end gap-2">
+                            <button
+                                onClick={() => {
+                                    const reportText = generateReport(lastReportData, lastReportData.reportNumber);
+                                    navigator.clipboard.writeText(reportText).then(() => {
+                                        setCopyStatus('Report copied to clipboard!');
+                                        setTimeout(() => setCopyStatus(''), 3000);
+                                    }).catch(err => {
+                                        console.error('Could not copy text: ', err);
+                                        setCopyStatus('Failed to copy report.');
+                                    });
+                                }}
+                                className="bg-blue-600 text-white font-semibold py-2 px-4 rounded-xl hover:bg-blue-700 transition duration-300"
+                            >
+                                Copy to Clipboard
+                            </button>
+                            <button
+                                onClick={() => setShowReportModal(false)}
+                                className="bg-gray-600 text-gray-200 font-semibold py-2 px-4 rounded-xl hover:bg-gray-700 transition duration-300"
+                            >
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            
+            {/* ALS Algorithm Modal */}
+            {showAlgorithmModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-black opacity-50"></div>
+                    <div className="bg-gray-800 p-6 rounded-2xl shadow-xl max-w-lg w-full z-10 overflow-y-auto max-h-[90vh]">
+                        <h3 className="text-xl font-bold mb-4">UK ALS Algorithm (2021 Guidelines)</h3>
+                        <p className="text-gray-300 mb-4">This is a simplified text representation for guidance. Always refer to the official Resuscitation Council UK guidelines.</p>
+                        <div className="space-y-4 text-sm leading-relaxed">
+                            <p className="bg-gray-700 p-3 rounded-lg font-bold">1. Check for Response</p>
+                            <p className="ml-4">- Shout for help, assess patient response.</p>
+                            <p className="bg-gray-700 p-3 rounded-lg font-bold">2. Call for help</p>
+                            <p className="ml-4">- Call resuscitation team. Get defibrillator and emergency equipment.</p>
+                            <p className="bg-gray-700 p-3 rounded-lg font-bold">3. Check for signs of life</p>
+                            <p className="ml-4">- Check for normal breathing (not agonal gasps), check for carotid pulse simultaneously.</p>
+                            <p className="bg-gray-700 p-3 rounded-lg font-bold">4. Start CPR (if no signs of life)</p>
+                            <p className="ml-4">- 30 chest compressions to 2 rescue breaths.</p>
+                            <p className="bg-gray-700 p-3 rounded-lg font-bold">5. Attach monitor/defibrillator</p>
+                            <p className="ml-4">- Assess rhythm: Is it shockable (VF/pVT) or non-shockable (PEA/Asystole)?</p>
+                            
+                            <p className="bg-purple-900 text-white p-3 rounded-lg font-bold mt-6">Shockable Pathway (VF/pVT)</p>
+                            <p className="ml-4">- **1st Shock:** Deliver one shock. Immediately resume CPR for 2 minutes. </p>
+                            <p className="ml-4">- **2nd Shock:** After 2 mins of CPR, check rhythm. If VF/pVT, deliver 2nd shock. Immediately resume CPR. </p>
+                            <p className="ml-4">- **3rd Shock:** After 2 mins of CPR, check rhythm. If VF/pVT, deliver 3rd shock. Give **Adrenaline** (1mg IV) and **Amiodarone** (300mg IV). Resume CPR.</p>
+                            <p className="ml-4">- **Subsequent Shocks:** Continue 2-minute cycles. Deliver shock after rhythm check if VF/pVT. Give **Adrenaline** (1mg IV) every 3-5 mins.</p>
+                            <p className="ml-4">- **5th Shock:** After 5th shock, consider a second dose of **Amiodarone** (150mg IV).</p>
+                            
+                            <p className="bg-orange-900 text-white p-3 rounded-lg font-bold mt-6">Non-Shockable Pathway (PEA/Asystole)</p>
+                            <p className="ml-4">- **CPR & Drugs:** Immediately start CPR. Give **Adrenaline** (1mg IV) as soon as IV access is available. Continue CPR for 2 minutes.</p>
+                            <p className="ml-4">- **Rhythm Checks:** Check rhythm every 2 minutes. If it remains non-shockable, continue CPR and give **Adrenaline** every 3-5 minutes.</p>
+                            <p className="ml-4">- **Reversible Causes:** Search for and treat reversible causes (4Hs & 4Ts) throughout.</p>
+
+                            <p className="bg-green-600 text-white p-3 rounded-lg font-bold mt-6">All Pathways</p>
+                            <p className="ml-4">- **ROSC:** Once ROSC is achieved, stop CPR and begin post-resuscitation care.</p>
+                            <p className="ml-4">- **Termination:** Consider stopping resuscitation if CPR is prolonged without a treatable reversible cause.</p>
+                        </div>
+                        <div className="mt-4 flex justify-end">
+                            <button
+                                onClick={() => setShowAlgorithmModal(false)}
+                                className="bg-gray-600 text-gray-200 font-semibold py-2 px-4 rounded-xl hover:bg-gray-700 transition duration-300"
+                            >
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            
+            {/* Rhythm Check Modal */}
+            {showRhythmModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-black opacity-50"></div>
+                    <div className="bg-gray-800 p-6 rounded-2xl shadow-xl max-w-lg w-full z-10 overflow-y-auto max-h-[90vh]">
+                        <h3 className="text-xl font-bold mb-4 text-center">Rhythm Check</h3>
+                        <p className="text-gray-300 mb-6 text-center">What is the rhythm?</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <button
+                                onClick={() => handleRhythmModalSelection('VF')}
+                                className="bg-red-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-red-700 transition duration-300 flex items-center gap-2 justify-center"
+                            >
+                                <SVGIcon icon="zap" size={24} /> VF (Ventricular Fibrillation)
+                            </button>
+                            <button
+                                onClick={() => handleRhythmModalSelection('pVT')}
+                                className="bg-red-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-red-700 transition duration-300 flex items-center gap-2 justify-center"
+                            >
+                                <SVGIcon icon="zap" size={24} /> pVT (Pulseless VT)
+                            </button>
+                            <button
+                                onClick={() => handleRhythmModalSelection('PEA')}
+                                className="bg-orange-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-orange-700 transition duration-300 flex items-center gap-2 justify-center"
+                            >
+                                <SVGIcon icon="heartPulse" size={24} /> Non-shockable (PEA)
+                            </button>
+                            <button
+                                onClick={() => handleRhythmModalSelection('Asystole')}
+                                className="bg-orange-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-orange-700 transition duration-300 flex items-center gap-2 justify-center"
+                            >
+                                <SVGIcon icon="cross" size={24} /> Non-shockable (Asystole)
+                            </button>
+                            <button
+                                onClick={() => setShowRhythmModal(false)}
+                                className="bg-gray-600 text-gray-200 font-semibold py-3 px-6 rounded-xl hover:bg-gray-700 transition duration-300"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Main Header */}
+            <div className="w-full max-w-4xl bg-gray-800 rounded-3xl shadow-lg p-6 mb-6 flex flex-col md:flex-row justify-between items-center gap-4">
+                <div className="flex items-center gap-3">
+                    <SVGIcon icon="ambulance" size={48} color="#2563eb" />
+                    <h1 className="text-3xl font-bold text-white">ResusAid</h1>
+                </div>
+                <div className="flex flex-col items-end">
+                    <div className="flex items-center gap-2 text-xl font-semibold text-gray-300">
+                        <SVGIcon icon="timer" size={24} />
+                        <span className="font-mono text-2xl">{formatTime(elapsedTime)}</span>
+                    </div>
+                    <div className="text-sm text-gray-400">
+                        {liveClock.toLocaleTimeString('en-GB')}
+                    </div>
+                </div>
+            </div>
+            
+            <div className="flex flex-col md:flex-row w-full max-w-4xl justify-center items-center gap-4 mb-4">
+                <div className="w-full text-center md:text-left">
+                    <button
+                        onClick={() => setShowAlgorithmModal(true)}
+                        className="bg-blue-600 text-white font-semibold py-2 px-4 rounded-xl hover:bg-blue-700 transition duration-300 flex items-center gap-2 justify-center w-full"
+                    >
+                        <SVGIcon icon="history" size={20} /> View ALS Algorithm
+                    </button>
+                </div>
+            </div>
+
+            {/* Main Flowchart/Algorithm Section */}
+            <div className="w-full max-w-4xl bg-gray-800 rounded-3xl shadow-lg p-6 mb-6">
+                <h2 className="text-2xl font-bold mb-4 text-center">UK ALS Algorithm Guide</h2>
+                <div className="flex flex-col items-center">
+                    {/* Countdown Timer */}
+                    {(currentStep === 'Start CPR' || currentStep === 'Defibrillation/Shock' || currentStep === 'CPR/Adrenaline') && (
+                        <div className={`bg-gray-700 p-4 rounded-xl w-full text-center mb-4 ${countdownTime <= 10 ? 'flash-warning' : ''}`}>
+                            <h3 className="text-lg font-semibold">Next Rhythm Check In:</h3>
+                            <div className="text-4xl font-mono text-red-400 mt-2">
+                                {formatCountdown(countdownTime)}
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Adrenaline Timer */}
+                    {timerRunning && (algorithmState.nonShockable || algorithmState.adrenalineDoses > 0 || (algorithmState.shockable && algorithmState.shocksGiven >= 3)) && (
+                        <div className="w-full grid grid-cols-1 gap-4 text-center mb-4">
+                            <div className={`p-4 rounded-xl ${adrenalineCountdown <= 60 ? 'flash-warning bg-gray-700' : 'bg-gray-700'}`}>
+                                <h3 className="text-lg font-semibold">Next Adrenaline in:</h3>
+                                <div className="text-xl font-mono text-orange-400 mt-1">{formatCountdown(adrenalineCountdown)}</div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Initial State / Rhythm Check */}
+                    {currentStep === 'Initial Check' && (
+                        <div className="bg-gray-700 p-6 rounded-2xl w-full text-center">
+                            <h3 className="text-xl font-semibold mb-3">Check for signs of life and ABCDs</h3>
+                            <p className="text-lg">Are they responsive? Are they breathing normally?</p>
+                            <div className="mt-4 flex flex-col md:flex-row gap-3 justify-center">
+                                <button
+                                    onClick={() => {
+                                        setCurrentStep('Start CPR');
+                                        handleStartStop();
+                                    }}
+                                    className="bg-red-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-red-700 transition duration-300"
+                                >
+                                    Start Resuscitation
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* CPR & Rhythm Check Loop */}
+                    {currentStep === 'Start CPR' && (
+                        <div className="bg-blue-900 p-6 rounded-2xl w-full text-center">
+                            <h3 className="text-xl font-semibold mb-3 flex items-center justify-center gap-2">
+                                <SVGIcon icon="heartPulse" size={24} />
+                                30:2 CPR Cycle
+                            </h3>
+                            <p className="text-lg mb-4">Continue CPR. At 2-minute intervals, pause to check rhythm.</p>
+                            <div className="mt-4 flex flex-col md:flex-row gap-3 justify-center">
+                                <button
+                                    onClick={() => setShowRhythmModal(true)}
+                                    className="bg-red-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-red-700 transition duration-300 flex items-center gap-2 justify-center"
+                                >
+                                    <SVGIcon icon="zap" size={24} /> Check Rhythm
+                                </button>
+                            </div>
+                            <p className="mt-4 text-sm text-gray-400 italic">Next rhythm check due in {formatCountdown(countdownTime)}</p>
+                        </div>
+                    )}
+
+                    {/* Shockable Pathway */}
+                    {algorithmState.shockable && (
+                        <div className="bg-purple-900 p-6 rounded-2xl w-full text-center mt-4">
+                            <h3 className="text-xl font-semibold mb-3">Shockable Pathway ({currentRhythm})</h3>
+                            <p className="text-lg mb-4">Deliver a single shock. Immediately resume CPR for 2 minutes.</p>
+                            <div className="flex flex-col md:flex-row gap-3 justify-center">
+                                <button
+                                    onClick={handleShockGiven}
+                                    className="bg-red-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-red-700 transition duration-300 flex items-center gap-2 justify-center"
+                                >
+                                    <SVGIcon icon="zap" size={24} /> Log Shock Given
+                                </button>
+                                <button
+                                    onClick={() => handleDrugGiven('Adrenaline')}
+                                    className="bg-orange-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-orange-700 transition duration-300 flex items-center gap-2 justify-center"
+                                >
+                                    <SVGIcon icon="syringe" size={24} /> Log Adrenaline
+                                </button>
+                                {/* BUG FIX: Changed condition from >= 2 to === 3 for first dose after 3rd shock */}
+                                {algorithmState.shocksGiven === 3 && algorithmState.amiodaroneDoses === 0 && (
+                                    <button
+                                        onClick={() => handleDrugGiven('Amiodarone', 300)}
+                                        className="bg-yellow-600 text-gray-900 font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-yellow-700 transition duration-300 flex items-center gap-2 justify-center"
+                                    >
+                                        <SVGIcon icon="syringe" size={24} /> Log Amiodarone (300mg)
+                                    </button>
+                                )}
+                                {/* BUG FIX: Changed condition from >= 4 to === 5 for second dose after 5th shock */}
+                                {algorithmState.shocksGiven === 5 && algorithmState.amiodaroneDoses > 0 && (
+                                    <button
+                                        onClick={() => handleDrugGiven('Amiodarone', 150)}
+                                        className="bg-yellow-600 text-gray-900 font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-yellow-700 transition duration-300 flex items-center gap-2 justify-center"
+                                    >
+                                        <SVGIcon icon="syringe" size={24} /> Log Amiodarone (150mg)
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Non-shockable Pathway */}
+                    {algorithmState.nonShockable && (
+                        <div className="bg-orange-900 p-6 rounded-2xl w-full text-center mt-4">
+                            <h3 className="text-xl font-semibold mb-3">Non-shockable Pathway ({currentRhythm})</h3>
+                            <p className="text-lg mb-4">Continue CPR. Administer Adrenaline every 3-5 minutes.</p>
+                            <div className="flex flex-col md:flex-row gap-3 justify-center">
+                                <button
+                                    onClick={() => handleDrugGiven('Adrenaline')}
+                                    className="bg-red-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-red-700 transition duration-300 flex items-center gap-2 justify-center"
+                                >
+                                    <SVGIcon icon="syringe" size={24} /> Log Adrenaline
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Airway & ROSC */}
+                    <div className="w-full text-center mt-6 flex flex-col md:flex-row gap-3 justify-center">
+                        {!algorithmState.airwaySecured && (
+                            <button
+                                onClick={handleAirwaySecured}
+                                className="bg-cyan-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-cyan-700 transition duration-300 flex items-center gap-2 justify-center"
+                            >
+                                <SVGIcon icon="tornado" size={24} /> Airway Secured
+                            </button>
+                        )}
+                        {!algorithmState.roscAchieved && (
+                            <button
+                                onClick={handleROSC}
+                                className="bg-green-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-green-700 transition duration-300 flex items-center gap-2 justify-center"
+                            >
+                                <SVGIcon icon="checkCircle" size={24} /> Log ROSC
+                            </button>
+                        )}
+                        {(algorithmState.shockable || algorithmState.nonShockable) && (
+                            <button
+                                onClick={handleRecheckRhythm}
+                                className="bg-blue-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-blue-700 transition duration-300 flex items-center gap-2 justify-center"
+                            >
+                                <SVGIcon icon="refresh" size={24} /> Re-check Rhythm
+                            </button>
+                        )}
+                        <button
+                            onClick={handleDiscontinue}
+                            className="bg-red-900 text-white font-bold py-3 px-6 rounded-xl shadow-lg hover:bg-red-950 transition duration-300 flex items-center gap-2 justify-center"
+                        >
+                            {/* BUG FIX: Changed icon from userMd to a more appropriate 'power' icon */}
+                            <SVGIcon icon="power" size={24} /> Discontinue CPR (Futility)
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            {/* Post-ROSC Prognostication Section */}
+            {showPostROSC && (
+                <div className={`w-full max-w-4xl rounded-3xl shadow-lg p-6 mb-6 ${algorithmState.roscAchieved ? 'bg-green-800' : 'bg-gray-800'}`}>
+                    <h2 className="text-2xl font-bold mb-4 text-center">Prognostication Notes</h2>
+                    <textarea
+                        value={roscNotes}
+                        onChange={(e) => setRoscNotes(e.target.value)}
+                        placeholder="Add your notes on patient's post-ROSC condition and likely prognosis here."
+                        rows="4"
+                        className="w-full bg-gray-700 text-gray-200 p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                    />
+                </div>
+            )}
+
+            {/* Additional Notes Section */}
+            <div className="w-full max-w-4xl bg-gray-800 rounded-3xl shadow-lg p-6 mb-6">
+                <h2 className="text-2xl font-bold mb-4 text-center">Additional Notes</h2>
+                <div className="flex flex-col space-y-4">
+                    <div className="flex items-center space-x-2">
+                        <input
+                            type="checkbox"
+                            id="voiceCountdownToggle"
+                            checked={voiceCountdownEnabled}
+                            onChange={(e) => setVoiceCountdownEnabled(e.target.checked)}
+                            className="form-checkbox h-5 w-5 text-blue-600 bg-gray-600 border-gray-500 rounded cursor-pointer"
+                        />
+                        <label htmlFor="voiceCountdownToggle" className="text-sm font-medium text-gray-300">Enable Voice Countdown</label>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-400 mb-1">Team Members Present:</label>
+                        <input
+                            type="text"
+                            value={teamMembers}
+                            onChange={(e) => setTeamMembers(e.target.value)}
+                            placeholder="e.g., Dr. Smith, Nurse Jones, etc."
+                            className="w-full bg-gray-700 text-gray-200 p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-400 mb-1">Blood Gas Results:</label>
+                        <input
+                            type="text"
+                            value={bloodGas}
+                            onChange={(e) => setBloodGas(e.target.value)}
+                            placeholder="e.g., pH 7.21, pCO2 6.5, lactate 8.2"
+                            className="w-full bg-gray-700 text-gray-200 p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-400 mb-1">Capnography (ETCO2):</label>
+                        <input
+                            type="text"
+                            value={capnography}
+                            onChange={(e) => setCapnography(e.target.value)}
+                            placeholder="e.g., 4.5 kPa"
+                            className="w-full bg-gray-700 text-gray-200 p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+                    <div>
+                        <div className="flex items-center justify-between">
+                            <label className="block text-sm font-medium text-gray-400 mb-1">Additional Comments:</label>
+                            <button
+                                onClick={isListening ? stopListening : handleVoiceInput}
+                                className={`p-2 rounded-full transition-colors duration-300 ${isListening ? 'bg-red-500 hover:bg-red-600' : 'bg-gray-600 hover:bg-gray-500'}`}
+                                title={isListening ? "Stop voice input" : "Start voice input"}
+                            >
+                                <SVGIcon icon="mic" size={20} color="white" />
+                            </button>
+                        </div>
+                        <textarea
+                            value={additionalComments}
+                            onChange={(e) => setAdditionalComments(e.target.value)}
+                            placeholder="e.g., 'Patient has a history of AF', 'Difficult intubation noted'."
+                            rows="4"
+                            className="w-full bg-gray-700 text-gray-200 p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                        />
+                    </div>
+                </div>
+            </div>
+
+            {/* 4Hs and 4Ts Reminder with Checkboxes */}
+            <div className="w-full max-w-4xl bg-gray-800 rounded-3xl shadow-lg p-6 mb-6">
+                <h2 className="text-2xl font-bold mb-4 text-center">Reversible Causes (4Hs & 4Ts)</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-left">
+                    {/* 4Hs */}
+                    <div className="bg-gray-700 p-4 rounded-xl">
+                        <h4 className="font-bold text-lg mb-2">4Hs</h4>
+                        {Object.keys(reversibleCauses).slice(0, 4).map(cause => (
+                            <div key={cause} className="flex items-center mb-2">
+                                <input
+                                    type="checkbox"
+                                    id={cause}
+                                    checked={reversibleCauses[cause]}
+                                    onChange={(e) => {
+                                        setReversibleCauses(prev => ({ ...prev, [cause]: e.target.checked }));
+                                        logEvent(`${e.target.checked ? 'Ticked off' : 'Unticked'} reversible cause: ${cause}`);
+                                    }}
+                                    className="form-checkbox h-5 w-5 text-blue-600 bg-gray-600 border-gray-500 rounded cursor-pointer"
+                                />
+                                <label htmlFor={cause} className="ml-2 text-gray-300 text-sm font-medium">{cause}</label>
+                            </div>
+                        ))}
+                    </div>
+                    {/* 4Ts */}
+                    <div className="bg-gray-700 p-4 rounded-xl">
+                        <h4 className="font-bold text-lg mb-2">4Ts</h4>
+                        {Object.keys(reversibleCauses).slice(4, 8).map(cause => (
+                            <div key={cause} className="flex items-center mb-2">
+                                <input
+                                    type="checkbox"
+                                    id={cause}
+                                    checked={reversibleCauses[cause]}
+                                    onChange={(e) => {
+                                        setReversibleCauses(prev => ({ ...prev, [cause]: e.target.checked }));
+                                        logEvent(`${e.target.checked ? 'Ticked off' : 'Unticked'} reversible cause: ${cause}`);
+                                    }}
+                                    className="form-checkbox h-5 w-5 text-blue-600 bg-gray-600 border-gray-500 rounded cursor-pointer"
+                                />
+                                <label htmlFor={cause} className="ml-2 text-gray-300 text-sm font-medium">{cause}</label>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+
+            {/* Event Timeline and Report Section */}
+            <div className="w-full max-w-4xl bg-gray-800 rounded-3xl shadow-lg p-6 mb-6">
+                <div className="flex justify-between items-center mb-4">
+                    <h2 className="text-2xl font-bold">Event Timeline</h2>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                        <button
+                            onClick={() => setShowHistory(!showHistory)}
+                            className="bg-gray-700 text-gray-200 font-semibold py-2 px-4 rounded-xl hover:bg-gray-600 transition duration-300 flex items-center gap-2"
+                        >
+                            <SVGIcon icon="history" size={24} /> {showHistory ? 'Hide History' : 'Show History'}
+                        </button>
+                        <button
+                            onClick={() => {
+                                setLastReportData({
+                                    elapsedTime,
+                                    algorithmState,
+                                    reversibleCauses,
+                                    bloodGas,
+                                    capnography,
+                                    teamMembers,
+                                    additionalComments,
+                                    roscNotes,
+                                    log: eventLog,
+                                    reportNumber: currentReportNumber
+                                });
+                                setShowReportModal(true);
+                            }}
+                            className="bg-blue-600 text-white font-semibold py-2 px-4 rounded-xl hover:bg-blue-700 transition duration-300 flex items-center gap-2"
+                        >
+                            <SVGIcon icon="download" size={24} /> Report
+                        </button>
+                        <button
+                            onClick={handleReset}
+                            className="bg-gray-600 text-gray-200 font-bold py-2 px-4 rounded-xl shadow-lg hover:bg-gray-700 transition duration-300 flex items-center gap-2 justify-center"
+                        >
+                            {/* BUG FIX: Changed icon from userMd to a more appropriate 'power' icon */}
+                            <SVGIcon icon="power" size={24} /> Reset
+                        </button>
+                    </div>
+                </div>
+                <div
+                    ref={eventTimelineRef}
+                    className={`overflow-y-auto transition-all duration-500 ease-in-out ${showHistory ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}
+                >
+                    <div className="bg-gray-700 p-4 rounded-xl">
+                        {eventLog.length > 0 ? (
+                            <ul className="list-none space-y-2">
+                                {eventLog.map((event, index) => (
+                                    <li key={index} className="bg-gray-800 p-3 rounded-xl shadow-sm text-sm">
+                                        <span className="font-mono text-gray-400">[{event.timer} | {event.timestamp}]</span>
+                                        <span className="font-semibold ml-2">{event.action}</span>
+                                        {event.notes && (
+                                            <p className="mt-1 ml-4 text-xs text-gray-500 italic">Notes: {event.notes}</p>
+                                        )}
+                                        {event.capnography && (
+                                            <p className="mt-1 ml-4 text-xs text-gray-500 italic">Capnography: {event.capnography}</p>
+                                        )}
+                                    </li>
+                                ))}
+                            </ul>
+                        ) : (
+                            <p className="text-center text-gray-500">No events logged yet.</p>
+                        )}
+                    </div>
+                </div>
+            </div>
+
+            {/* Search Functionality */}
+            <div className="w-full max-w-4xl bg-gray-800 rounded-3xl shadow-lg p-6 mb-6">
+                <h2 className="text-2xl font-bold mb-4 text-center">Search Previous Reports</h2>
+                <div className="flex flex-col sm:flex-row gap-4 items-center">
+                    <input
+                        type="number"
+                        placeholder="Enter Report Number"
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="w-full sm:w-2/3 bg-gray-700 text-gray-200 p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <button
+                        onClick={() => loadSpecificReport(parseInt(searchTerm))}
+                        className="w-full sm:w-1/3 bg-purple-600 text-white font-semibold py-3 px-6 rounded-xl hover:bg-purple-700 transition duration-300 flex items-center justify-center gap-2"
+                    >
+                        <SVGIcon icon="search" size={24} /> Load Report
+                    </button>
+                </div>
+            </div>
+
+
+            {/* Footer */}
+            <div className="mt-8 text-center text-xs text-gray-500 max-w-2xl italic">
+                <p>Disclaimer: This application is a conceptual tool for educational and guidance purposes only and is not a substitute for professional medical judgment. It should not be used in a real-world clinical setting without proper validation and training. All data is stored locally in your browser's storage and is not transmitted to any external server.</p>
+                <p className="mt-2">Created by Dr Mohammed Ali Mahmood (made using AI technology)</p>
+            </div>
+        </div>
+    );
+};
+
+// Find the root element and render the app
+const root = createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+
+</body>
+</html>
